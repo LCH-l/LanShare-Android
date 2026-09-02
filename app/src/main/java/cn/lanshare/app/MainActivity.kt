@@ -17,6 +17,8 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import com.chaquo.python.Python
+import com.chaquo.python.android.AndroidPlatform
 import java.net.InetAddress
 import java.net.Socket
 import kotlin.concurrent.thread
@@ -120,8 +122,16 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 等待 Python 服务就绪（轮询 127.0.0.1:8765，最多 30 秒） */
+    /** 启动 Chaquopy Python 运行时（必须显式调用，否则 Python 服务永不启动），然后等待管理面板就绪 */
     private fun startPythonAndWait() {
+        try {
+            // 关键：Chaquopy 不会自动启动 Python，必须显式 init
+            // AndroidPlatform(this) 把 Android 资源/Context 暴露给 Python
+            Python.start(AndroidPlatform(this))
+        } catch (e: Exception) {
+            runOnUiThread { status.text = "Python 初始化失败：${e.message}" }
+            return
+        }
         var ready = false
         for (i in 0..60) {
             if (portOpen("127.0.0.1", 8765)) { ready = true; break }
@@ -129,8 +139,7 @@ class MainActivity : Activity() {
         }
         val ip = wifiIp()
         val msg = if (ready) {
-            val shared = "共享地址: http://$ip:8766（管理面板已就绪）"
-            shared
+            "管理面板已就绪 · 共享地址：http://$ip:8766（若 8766 不可用，请点「文件权限」授予）"
         } else {
             "服务启动异常，请稍后点「刷新面板」重试"
         }
