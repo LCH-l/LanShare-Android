@@ -47,6 +47,12 @@ def get_status():
     return _ERROR if _STATE == "error" else _STATE
 
 
+def set_share(path, is_file=False):
+    """App 系统文件选择器选定目录/文件后调用（path 为真实路径）"""
+    _ensure_run()
+    return LanShare.add_share(path)
+
+
 # 双保险：若 Chaquopy 入口是“执行顶层代码”，这里会立即触发
 if os.environ.get("_LANSHARE_MAIN_RUN") != "1":
     os.environ["_LANSHARE_MAIN_RUN"] = "1"
