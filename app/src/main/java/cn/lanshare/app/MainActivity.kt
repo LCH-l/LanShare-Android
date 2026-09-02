@@ -9,8 +9,10 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.ViewGroup
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Button
@@ -24,15 +26,19 @@ import java.net.Socket
 import kotlin.concurrent.thread
 
 /**
- * LanShare Android 壳：
- * 启动时在后台线程运行内嵌 Python（LanShare 服务），
- * 界面用 WebView 加载本机 127.0.0.1:8765 管理面板。
+ * LanShare Android：
+ * - WebView 加载“固化”的本地管理面板（assets/admin.html），管理服务未启动也能看界面
+ * - 系统文件选择器（SAF）选取要共享的目录/文件，无需手工输入路径
+ * - Chaquopy 在主线程初始化后自动运行内嵌 Python 服务
  */
 class MainActivity : Activity() {
 
     private lateinit var web: WebView
     private lateinit var status: TextView
     private val adminUrl = "http://127.0.0.1:8765/"
+    private val assetPage = "file:///android_asset/admin.html"
+    private val REQ_DIR = 1001
+    private val REQ_FILE = 1002
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -40,7 +46,7 @@ class MainActivity : Activity() {
         val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         status = TextView(this).apply {
-            text = "正在启动共享服务…"
+            text = "正在启动服务…"
             textSize = 14f
             setPadding(16, 12, 16, 0)
         }
@@ -48,20 +54,27 @@ class MainActivity : Activity() {
 
         fun mkBtn(label: String, act: () -> Unit) = Button(this).apply {
             text = label
+            textSize = 12f
             isAllCaps = false
             layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
             setOnClickListener { act() }
         }
-        val bar = LinearLayout(this).apply {
+        val rowA = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            setPadding(16, 8, 16, 4)
+            setPadding(16, 6, 16, 2)
         }
-        bar.addView(mkBtn("刷新面板") { loadPanel() })
-        bar.addView(mkBtn("浏览器打开") { openBrowser() })
-        if (Build.VERSION.SDK_INT >= 30) {
-            bar.addView(mkBtn("文件权限") { openAllFiles() })
+        rowA.addView(mkBtn("刷新面板") { loadPanel() })
+        rowA.addView(mkBtn("浏览器打开") { openBrowser() })
+        root.addView(rowA)
+
+        val rowB = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(16, 2, 16, 6)
         }
-        root.addView(bar)
+        rowB.addView(mkBtn("共享目录") { pickDir() })
+        rowB.addView(mkBtn("共享文件") { pickFile() })
+        rowB.addView(mkBtn("文件权限") { openAllFiles() })
+        root.addView(rowB)
 
         web = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
@@ -69,14 +82,20 @@ class MainActivity : Activity() {
             )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            // 允许 file:// 页面访问 http://127.0.0.1（本机管理服务）
+            settings.setAllowUniversalAccessFromFileURLs(true)
+            settings.setAllowFileAccessFromFileURLs(true)
+            settings.mediaPlaybackRequiresUserGesture = false
             webViewClient = WebViewClient()
         }
         root.addView(web)
         setContentView(root)
 
+        // 先加载固化面板（不依赖服务）
+        loadPanel()
+
         requestLegacyRead()
-        // Chaquopy 要求：Python.start 必须在主线程初始化（官方模式）
-        // 初始化耗时约 1-3 秒，期间 UI 保持"正在启动"提示
+        // Chaquopy 官方要求：主线程初始化 Python
         try {
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(this))
@@ -90,7 +109,95 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Android 12 及以下：运行时申请读存储权限 */
+    // ========== 系统文件选择器（需求2：手动选取共享对象，不手工输路径） ==========
+    private fun pickDir() {
+        try {
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+                    .putExtra("android.content.extra.SHOW_ADVANCED", true),
+                REQ_DIR
+            )
+        } catch (e: Exception) {
+            toast("无法打开目录选择器：${e.message}")
+        }
+    }
+
+    private fun pickFile() {
+        try {
+            startActivityForResult(
+                Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                    addCategory(Intent.CATEGORY_OPENABLE)
+                    type = "*/*"
+                },
+                REQ_FILE
+            )
+        } catch (e: Exception) {
+            toast("无法打开文件选择器：${e.message}")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK || data?.data == null) return
+        val uri = data.data!!
+        val path: String? = when (requestCode) {
+            REQ_DIR -> treeUriToFsPath(uri)
+            REQ_FILE -> docUriToFsPath(uri)
+            else -> null
+        }
+        if (path == null) {
+            toast("无法把所选内容映射为可共享路径（请授予“所有文件访问”后重试）")
+            return
+        }
+        // 调 Python 设置共享
+        thread(name = "set-share") {
+            try {
+                val py = Python.getInstance().getModule("main")
+                val res = py.callAttr("set_share", path).toString()
+                runOnUiThread {
+                    status.text = "已共享：$path"
+                    loadPanel()
+                    toast("共享已设置：$res")
+                }
+            } catch (e: Exception) {
+                runOnUiThread { toast("设置共享失败：${e.message}") }
+            }
+        }
+    }
+
+    /** ACTION_OPEN_DOCUMENT_TREE 返回的 tree Uri -> /storage/emulated/0/... */
+    private fun treeUriToFsPath(uri: Uri): String? {
+        return try {
+            val id = DocumentsContract.getTreeDocumentId(uri)   // primary:Download
+            docIdToPath(id)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** ACTION_OPEN_DOCUMENT 返回的 document Uri -> /storage/emulated/0/... */
+    private fun docUriToFsPath(uri: Uri): String? {
+        return try {
+            val id = DocumentsContract.getDocumentId(uri)       // primary:Download/xx.apk
+            docIdToPath(id)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun docIdToPath(id: String): String? {
+        val idx = id.indexOf(':')
+        if (idx <= 0) return null
+        val type = id.substring(0, idx)
+        val rel = id.substring(idx + 1)
+        return when (type) {
+            "primary" -> "${Environment.getExternalStorageDirectory().path}/$rel"
+            "home" -> "${Environment.getExternalStorageDirectory().path}/$rel"
+            else -> null  // 外置 SD 卡等无法映射，暂不支持
+        }
+    }
+
+    // ========== 权限（Android 13+ 需要“所有文件访问”） ==========
     private fun requestLegacyRead() {
         if (Build.VERSION.SDK_INT <= 32 &&
             checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE)
@@ -100,7 +207,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** Android 13+：引导授予"所有文件访问" */
     private fun openAllFiles() {
         try {
             if (Build.VERSION.SDK_INT >= 30 && !Environment.isExternalStorageManager()) {
@@ -111,28 +217,26 @@ class MainActivity : Activity() {
                     )
                 )
             } else {
-                Toast.makeText(this, "已具备文件访问权限", Toast.LENGTH_SHORT).show()
+                toast("已具备文件访问权限")
             }
         } catch (e: Exception) {
             try {
                 startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
             } catch (e2: Exception) {
-                Toast.makeText(this, "无法打开设置: ${e2.message}", Toast.LENGTH_SHORT).show()
+                toast("无法打开设置：${e2.message}")
             }
         }
     }
 
     private fun openBrowser() {
-        runOnUiThread {
-            try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(adminUrl)))
-            } catch (e: Exception) {
-                Toast.makeText(this, "无可用浏览器", Toast.LENGTH_SHORT).show()
-            }
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(adminUrl)))
+        } catch (e: Exception) {
+            toast("无可用浏览器")
         }
     }
 
-    /** 等待 Chaquopy 执行 main.py 后，管理面板(8765)就绪 */
+    // ========== 服务就绪 ==========
     private fun startPythonAndWait() {
         var ready = false
         for (i in 0..60) {
@@ -142,9 +246,9 @@ class MainActivity : Activity() {
         val ip = wifiIp()
         val pyErr = pythonError()
         val msg = when {
-            ready -> "管理面板已就绪 · 共享地址 http://$ip:8766\n（如 8766 打不开请点「文件权限」并重启 App）"
+            ready -> "管理面板已就绪 · 共享地址 http://$ip:8766"
             pyErr != null -> "服务启动失败：$pyErr\n请把以上文字反馈给开发者"
-            else -> "服务启动超时（30秒），请点「刷新面板」重试"
+            else -> "服务启动超时，管理面板仍可使用；请稍后点「刷新面板」"
         }
         runOnUiThread {
             status.text = msg
@@ -152,7 +256,6 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 读取 Python 侧记录的启动错误（来自 main.py 的 get_status()） */
     private fun pythonError(): String? = try {
         val mod = Python.getInstance().getModule("main")
         val s = mod.callAttr("get_status").toString().trim()
@@ -161,11 +264,12 @@ class MainActivity : Activity() {
         "无法读取 Python 状态：${e.message}"
     }
 
+    // ========== 页面加载 ==========
     private fun loadPanel() {
         try {
-            web.loadUrl(adminUrl)
+            web.loadUrl(assetPage)   // 固化管理面板（本地 assets）
         } catch (e: Exception) {
-            Toast.makeText(this, "加载失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            toast("加载面板失败：${e.message}")
         }
     }
 
@@ -190,6 +294,12 @@ class MainActivity : Activity() {
             ).hostAddress ?: "本机"
         } catch (e: Exception) {
             "本机"
+        }
+    }
+
+    private fun toast(msg: String) {
+        runOnUiThread {
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
         }
     }
 
