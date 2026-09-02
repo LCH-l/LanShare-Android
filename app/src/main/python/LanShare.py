@@ -230,6 +230,9 @@ def resolve_path(vpath):
 
     if len(shares) == 1:
         base = shares[0]["path"]
+        # 单个共享对象为“文件”时：根或文件名均指向该文件本身
+        if os.path.isfile(base):
+            return os.path.normpath(base) if len(parts) <= 1 else None
         return os.path.normpath(os.path.join(base, *parts))
 
     if not parts:
@@ -238,7 +241,10 @@ def resolve_path(vpath):
     alias = parts[0]
     for sh in shares:
         if sh["name"] == alias:
-            return os.path.normpath(os.path.join(sh["path"], *parts[1:]))
+            sp = sh["path"]
+            if os.path.isfile(sp):      # 文件级共享（别名即文件名）
+                return os.path.normpath(sp) if len(parts) <= 1 else None
+            return os.path.normpath(os.path.join(sp, *parts[1:]))
     return None
 
 
@@ -422,6 +428,22 @@ class ShareHandler(BaseHTTPRequestHandler):
                      for s in CFG.get("shares", [])]
             self._json({"path": "", "permission": CFG.get("permission"),
                         "items": items})
+            return
+
+        if os.path.isfile(real):
+            # 单文件共享：虚拟根/文件名都指向该文件，直接作为条目返回
+            try:
+                st = os.stat(real)
+                size = st.st_size
+            except Exception:
+                size = 0
+            self._json({
+                "path": os.path.basename(real),
+                "permission": CFG.get("permission"),
+                "single_file": True,
+                "items": [{"name": os.path.basename(real), "is_dir": False,
+                           "size": size, "mtime": ""}],
+            })
             return
 
         if not os.path.isdir(real):
@@ -819,6 +841,24 @@ def stop_share():
         pass
     _share_server = None
     return True, "共享服务已停止"
+
+
+def add_share(path, name=None):
+    """添加/更新共享对象（目录或单个文件），立即生效。返回 (ok, msg)"""
+    try:
+        path = os.path.abspath(path)
+    except Exception as e:
+        return False, f"路径不合法: {e}"
+    if not os.path.exists(path):
+        return False, f"路径不存在: {path}"
+    name = name or (os.path.basename(path) or "共享")
+    shares = CFG.setdefault("shares", [])
+    CFG["shares"] = [s for s in shares
+                     if os.path.normpath(s.get("path", "")) != os.path.normpath(path)]
+    CFG["shares"].append({"name": name, "path": path})
+    if _share_server is None:
+        return start_share()
+    return True, f"已共享: {path}"
 
 
 def start_admin():
