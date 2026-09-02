@@ -75,6 +75,16 @@ class MainActivity : Activity() {
         setContentView(root)
 
         requestLegacyRead()
+        // Chaquopy 要求：Python.start 必须在主线程初始化（官方模式）
+        // 初始化耗时约 1-3 秒，期间 UI 保持"正在启动"提示
+        try {
+            if (!Python.isStarted()) {
+                Python.start(AndroidPlatform(this))
+            }
+        } catch (e: Exception) {
+            status.text = "Python 初始化失败：${e.message}\n请把此文字反馈给开发者"
+            return
+        }
         thread(name = "lanshare-boot") {
             startPythonAndWait()
         }
@@ -122,31 +132,33 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 启动 Chaquopy Python 运行时（必须显式调用，否则 Python 服务永不启动），然后等待管理面板就绪 */
+    /** 等待 Chaquopy 执行 main.py 后，管理面板(8765)就绪 */
     private fun startPythonAndWait() {
-        try {
-            // 关键：Chaquopy 不会自动启动 Python，必须显式 init
-            // AndroidPlatform(this) 把 Android 资源/Context 暴露给 Python
-            Python.start(AndroidPlatform(this))
-        } catch (e: Exception) {
-            runOnUiThread { status.text = "Python 初始化失败：${e.message}" }
-            return
-        }
         var ready = false
         for (i in 0..60) {
             if (portOpen("127.0.0.1", 8765)) { ready = true; break }
             Thread.sleep(500)
         }
         val ip = wifiIp()
-        val msg = if (ready) {
-            "管理面板已就绪 · 共享地址：http://$ip:8766（若 8766 不可用，请点「文件权限」授予）"
-        } else {
-            "服务启动异常，请稍后点「刷新面板」重试"
+        val pyErr = pythonError()
+        val msg = when {
+            ready -> "管理面板已就绪 · 共享地址 http://$ip:8766\n（如 8766 打不开请点「文件权限」并重启 App）"
+            pyErr != null -> "服务启动失败：$pyErr\n请把以上文字反馈给开发者"
+            else -> "服务启动超时（30秒），请点「刷新面板」重试"
         }
         runOnUiThread {
             status.text = msg
             if (ready) loadPanel()
         }
+    }
+
+    /** 读取 Python 侧记录的启动错误（来自 main.py 的 get_status()） */
+    private fun pythonError(): String? = try {
+        val mod = Python.getInstance().getModule("main")
+        val s = mod.callAttr("get_status").toString().trim()
+        if (s.isEmpty() || s == "running") null else s
+    } catch (e: Exception) {
+        "无法读取 Python 状态：${e.message}"
     }
 
     private fun loadPanel() {
