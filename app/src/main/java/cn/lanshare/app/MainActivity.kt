@@ -154,20 +154,22 @@ class MainActivity : Activity() {
         false
     }
 
-    private fun wifiIp(): String = try {
-        val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
-        val info = wm.connectionInfo ?: return "本机"
-        val i = info.ipAddress
-        InetAddress.getByAddress(
-            byteArrayOf(
-                (i and 0xff).toByte(),
-                (i shr 8 and 0xff).toByte(),
-                (i shr 16 and 0xff).toByte(),
-                (i shr 24 and 0xff).toByte()
-            )
-        ).hostAddress ?: "本机"
-    } catch (e: Exception) {
-        "本机"
+    private fun wifiIp(): String {
+        return try {
+            val wm = applicationContext.getSystemService(WIFI_SERVICE) as WifiManager
+            val info = wm.connectionInfo ?: return "本机"
+            val i = info.ipAddress
+            InetAddress.getByAddress(
+                byteArrayOf(
+                    (i and 0xff).toByte(),
+                    (i shr 8 and 0xff).toByte(),
+                    (i shr 16 and 0xff).toByte(),
+                    (i shr 24 and 0xff).toByte()
+                )
+            ).hostAddress ?: "本机"
+        } catch (e: Exception) {
+            "本机"
+        }
     }
 
     override fun onBackPressed() {
